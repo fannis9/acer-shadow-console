@@ -1,0 +1,3 @@
+# Acer Shadow / Clevo EC 控制台权限（单用户笔电，放权给本机）
+SUBSYSTEM=="misc", KERNEL=="tuxedo_io", MODE="0666"
+SUBSYSTEM=="leds", KERNEL=="rgb:kbd_backlight*", MODE="0666"

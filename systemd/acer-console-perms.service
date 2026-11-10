@@ -1,0 +1,12 @@
+[Unit]
+Description=acer-console: EC 设备节点权限
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/acer-perms.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""Acer Shadow 控制台 —— 基于 Clevo EC 接口的 Linux 版 NitroSense。
+
+风扇/温度：/dev/tuxedo_io（tuxedo_io 模块的 clevo_acpi 接口）
+键盘灯：/sys/class/leds/rgb:kbd_backlight
+性能模式：powerprofilesctl（ACPI platform_profile）
+"""
+import fcntl
+import json
+import os
+import struct
+import subprocess
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+
+TIO_DEV = "/dev/tuxedo_io"
+LED_DIR = "/sys/class/leds/rgb:kbd_backlight"
+# 纯色 + 两色叠加的二次色
+PRESETS = (
+    ("红", (255, 0, 0)),
+    ("绿", (0, 255, 0)),
+    ("蓝", (0, 0, 255)),
+    ("黄", (255, 255, 0)),      # 红+绿
+    ("青", (0, 255, 255)),      # 绿+蓝
+    ("品红", (255, 0, 255)),    # 红+蓝
+    ("白", (255, 255, 255)),
+)
+
+# ioctl 常量：_IOC(dir, type, nr, size)
+_IOC_READ, _IOC_WRITE = 2, 1
+
+
+def _ioc(direction, typ, nr, size=8):
+    return (direction << 30) | (size << 16) | (typ << 8) | nr
+
+
+R_FANINFO1 = _ioc(_IOC_READ, 0xED, 0x10)
+R_FANINFO2 = _ioc(_IOC_READ, 0xED, 0x11)
+R_FANINFO3 = _ioc(_IOC_READ, 0xED, 0x12)
+W_FANSPEED = _ioc(_IOC_WRITE, 0xEE, 0x10)
+W_FANAUTO = _ioc(_IOC_WRITE, 0xEE, 0x11)
+
+PROFILES = {
+    "performance": "性能",
+    "balanced": "平衡",
+    "power-saver": "节能",
+}
+
+
+def tio(cmd, payload=None):
+    """读写 /dev/tuxedo_io，返回 int32 或 None。"""
+    try:
+        fd = open(TIO_DEV, "rb+" if payload is not None else "rb", buffering=0)
+    except OSError:
+        return None
+    try:
+        if payload is None:
+            data = fcntl.ioctl(fd, cmd, b"\0\0\0\0")
+            return struct.unpack("<i", data)[0]
+        fcntl.ioctl(fd, cmd, struct.pack("<i", payload))
+        return 0
+    except OSError:
+        return None
+    finally:
+        fd.close()
+
+
+def read_fan():
+    """返回 (cpu温度, gpu温度, 风扇%)。"""
+    v = tio(R_FANINFO1)
+    if v is None or v < 0:
+        return None
+    return (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF
+
+
+FAN_MAX = 255
+
+
+def pct_to_raw(pct):
+    """界面用百分比，硬件寄存器是 0-255。"""
+    return max(0, min(FAN_MAX, round(pct * FAN_MAX / 100)))
+
+
+def raw_to_pct(raw):
+    return round(raw * 100 / FAN_MAX)
+
+
+def set_fan(cpu_pct, gpu_pct=None):
+    cpu = pct_to_raw(cpu_pct)
+    gpu = cpu if gpu_pct is None else pct_to_raw(gpu_pct)
+    return tio(W_FANSPEED, (cpu & 0xFF) | ((gpu & 0xFF) << 8)) == 0
+
+
+def fan_auto():
+    """参数是风扇位掩码：1 只松开 0 号，0xFF 才是全部。"""
+    return tio(W_FANAUTO, 0xFF) == 0
+
+
+def read_led_state():
+    """读硬件当前颜色与亮度，避免界面用默认值覆盖用户手动设的色。"""
+    try:
+        r, g, b = (int(v) for v in open(f"{LED_DIR}/multi_intensity").read().split()[:3])
+        level = int(open(f"{LED_DIR}/brightness").read().strip())
+        return (r, g, b), level
+    except (OSError, ValueError):
+        return (120, 90, 255), 150
+
+
+def _log(msg):
+    try:
+        with open("/tmp/acer-console-led.log", "a") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
+
+
+# 通道增益（1.0 = 不衰减）。用来校正 LED 三色亮度不平衡。
+CONF_DIR = os.path.expanduser("~/.config/acer-console")
+CONF_FILE = os.path.join(CONF_DIR, "config.json")
+
+
+def load_conf():
+    try:
+        with open(CONF_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_conf(data):
+    try:
+        os.makedirs(CONF_DIR, exist_ok=True)
+        with open(CONF_FILE, "w") as fh:
+            json.dump(data, fh, indent=1)
+    except OSError:
+        pass
+
+
+_CONF = load_conf()
+GAIN = {"r": 1.0, "g": 1.0, "b": 1.0}
+GAIN.update({k: float(v) for k, v in (_CONF.get("gain") or {}).items() if k in GAIN})
+
+
+def apply_gain(rgb):
+    r, g, b = rgb
+    return (
+        max(0, min(255, round(r * GAIN["r"]))),
+        max(0, min(255, round(g * GAIN["g"]))),
+        max(0, min(255, round(b * GAIN["b"]))),
+    )
+
+
+def set_led(rgb, level):
+    """单区键盘。写颜色后必须让 brightness 变化一次，驱动才会下发。"""
+    rgb = apply_gain(rgb)
+    level = max(0, min(255, int(level)))
+    _log(f"set_led rgb={rgb} level={level}")
+    try:
+        with open(f"{LED_DIR}/multi_intensity", "w") as fh:
+            fh.write(f"{rgb[0]} {rgb[1]} {rgb[2]}")
+        for value in (max(0, level - 1), level):
+            with open(f"{LED_DIR}/brightness", "w") as fh:
+                fh.write(str(value))
+        _log(f"set_led OK -> {open(f'{LED_DIR}/multi_intensity').read().strip()} @ {open(f'{LED_DIR}/brightness').read().strip()}")
+        return True
+    except OSError as exc:
+        _log(f"set_led FAIL {exc}")
+        return False
+
+
+def led_off():
+    try:
+        with open(f"{LED_DIR}/brightness", "w") as fh:
+            fh.write("0")
+    except OSError:
+        pass
+
+
+def profile_get():
+    try:
+        out = subprocess.run(
+            ["powerprofilesctl", "get"], capture_output=True, text=True, timeout=5
+        )
+        return out.stdout.strip()
+    except Exception:
+        return ""
+
+
+def profile_set(name):
+    try:
+        subprocess.run(["powerprofilesctl", "set", name], timeout=5, check=False)
+        return True
+    except Exception:
+        return False
+
+
+class Console(Adw.ApplicationWindow):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.set_title("Acer Shadow 控制台")
+        self.set_default_size(760, 720)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.set_content(box)
+
+        header = Adw.HeaderBar()
+        self.status_label = Gtk.Label(label="")
+        self.status_label.add_css_class("dim-label")
+        header.pack_start(self.status_label)
+        box.append(header)
+
+        page = Adw.PreferencesPage()
+        box.append(page)
+
+        # ---- 状态 ----
+        mon = Adw.PreferencesGroup(title="实时状态")
+        page.add(mon)
+        self.row_cpu = Adw.ActionRow(title="CPU 温度")
+        self.row_gpu = Adw.ActionRow(title="GPU 温度")
+        self.row_fan = Adw.ActionRow(title="风扇转速")
+        self.lbl_cpu = Gtk.Label(label="--")
+        self.lbl_gpu = Gtk.Label(label="--")
+        self.lbl_fan = Gtk.Label(label="--")
+        for row, lbl in (
+            (self.row_cpu, self.lbl_cpu),
+            (self.row_gpu, self.lbl_gpu),
+            (self.row_fan, self.lbl_fan),
+        ):
+            lbl.add_css_class("title-4")
+            row.add_suffix(lbl)
+            mon.add(row)
+
+        # ---- 性能模式 ----
+        perf = Adw.PreferencesGroup(
+            title="性能模式",
+            description="与系统「电源」设置共用同一个 ACPI platform_profile",
+        )
+        page.add(perf)
+        pbox = Gtk.Box(spacing=6)
+        pbox.add_css_class("linked")
+        pbox.set_halign(Gtk.Align.FILL)
+        self.profile_buttons = {}
+        for key, label in PROFILES.items():
+            btn = Gtk.ToggleButton(label=label)
+            btn.set_hexpand(True)
+            btn.connect("toggled", self.on_profile, key)
+            pbox.append(btn)
+            self.profile_buttons[key] = btn
+        prow = Adw.ActionRow()
+        prow.set_child(pbox)
+        perf.add(prow)
+
+        # ---- 风扇 ----
+        fan = Adw.PreferencesGroup(
+            title="风扇",
+            description="手动值低于固件下限会被驱动夹成 0（等于关闭）",
+        )
+        page.add(fan)
+        self.row_auto = Adw.SwitchRow(title="自动控制", subtitle="交还 EC 固件按温度曲线调速")
+        self.row_auto.set_active(True)
+        self.row_auto.connect("notify::active", self.on_auto)
+        fan.add(self.row_auto)
+
+        self.scale_fan = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 5)
+        self.scale_fan.set_hexpand(True)
+        self.scale_fan.set_draw_value(True)
+        self.scale_fan.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_fan.set_value(60)
+        self.scale_fan.set_sensitive(False)
+        fan_row = Adw.ActionRow(title="目标转速")
+        fan_row.add_suffix(self.scale_fan)
+        fan_row.set_activatable_widget(self.scale_fan)
+        fan.add(fan_row)
+
+        apply_row = Adw.ActionRow()
+        apply_btn = Gtk.Button(label="应用风扇转速")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.connect("clicked", self.on_apply_fan)
+        apply_row.set_child(apply_btn)
+        fan.add(apply_row)
+
+        # ---- 键盘灯 ----
+        led = Adw.PreferencesGroup(title="键盘灯", description="这台机器是单区 RGB")
+        page.add(led)
+
+        hw_rgb, hw_level = read_led_state()
+        self.led_color = hw_rgb
+        box = Gtk.Box(spacing=6)
+        box.set_halign(Gtk.Align.START)
+        for name, rgb in PRESETS:
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.set_tooltip_text(name)
+            sw = Gtk.DrawingArea()
+            sw.set_content_width(24)
+            sw.set_content_height(16)
+            r, g, b = rgb
+            sw.set_draw_func(self.draw_swatch, (r / 255, g / 255, b / 255))
+            btn.set_child(sw)
+            btn.connect("clicked", lambda _b, c=rgb: self.apply_color(c))
+            box.append(btn)
+
+        self.color_btn = Gtk.ColorDialogButton()
+        self.color_btn.set_dialog(self._color_dialog())
+        self.color_btn.set_rgba(
+            Gdk.RGBA(self.led_color[0] / 255, self.led_color[1] / 255, self.led_color[2] / 255, 1.0)
+        )
+        self.color_btn.connect("notify::rgba", self.on_color_pick)
+        box.append(self.color_btn)
+
+        crow = Adw.ActionRow(title="颜色")
+        crow.add_suffix(box)
+        led.add(crow)
+
+        self.scale_bright = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.scale_bright.set_hexpand(True)
+        self.scale_bright.set_draw_value(True)
+        self.scale_bright.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale_bright.set_value(round(hw_level * 100 / 255))  # 先设值
+        self.scale_bright.connect("value-changed", self.on_bright)  # 再连信号
+        brow = Adw.ActionRow(title="亮度")
+        brow.add_suffix(self.scale_bright)
+        brow.set_activatable_widget(self.scale_bright)
+        led.add(brow)
+
+        cal = Adw.PreferencesGroup(
+            title="色彩校准",
+            description="二次色偏色时调整：把发得最弱的通道往上调，或把最强的往下调",
+        )
+        page.add(cal)
+        self.gain_scales = {}
+        for ch, label in (("r", "红通道增益"), ("g", "绿通道增益"), ("b", "蓝通道增益")):
+            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 1)
+            sc.set_hexpand(True)
+            sc.set_draw_value(True)
+            sc.set_value(round(GAIN[ch] * 100))
+            sc.set_value_pos(Gtk.PositionType.RIGHT)
+            sc.connect("value-changed", self.on_gain, ch)
+            row = Adw.ActionRow(title=label)
+            row.add_suffix(sc)
+            row.set_activatable_widget(sc)
+            cal.add(row)
+            self.gain_scales[ch] = sc
+
+        reset_row = Adw.ActionRow()
+        reset_btn = Gtk.Button(label="原色直出（增益复位）")
+        reset_btn.connect("clicked", lambda _b: self.reset_gain())
+        reset_row.set_child(reset_btn)
+        cal.add(reset_row)
+
+        off_row = Adw.ActionRow()
+        off_btn = Gtk.Button(label="关闭键盘灯")
+        off_btn.connect("clicked", lambda _b: led_off())
+        off_row.set_child(off_btn)
+        led.add(off_row)
+
+        self.refresh_profile()
+        self.refresh_monitor()
+        GLib.timeout_add(1000, self.refresh_monitor)
+
+    # ---------- 绘制 ----------
+    def draw_swatch(self, area, cr, w, h, rgb):
+        cr.set_source_rgb(*rgb)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+
+    def _color_dialog(self):
+        dlg = Gtk.ColorDialog()
+        dlg.set_with_alpha(False)
+        return dlg
+
+    # ---------- 行为 ----------
+    def refresh_monitor(self):
+        info = read_fan()
+        if info is None:
+            self.lbl_cpu.set_label("不可用")
+            self.lbl_gpu.set_label("不可用")
+            self.lbl_fan.set_label("不可用")
+            self.status_label.set_label("模块未加载")
+            return True  # 必须继续轮询，否则一次失败后定时器就停了
+        cpu, gpu, fan = info
+        self.lbl_cpu.set_label(f"{cpu} °C")
+        self.lbl_gpu.set_label(f"{gpu} °C")
+        self.lbl_fan.set_label(f"{raw_to_pct(fan)} %  ({fan}/255)")
+        return True
+
+    def refresh_profile(self):
+        cur = profile_get()
+        for key, btn in self.profile_buttons.items():
+            btn.handler_block_by_func(self.on_profile)
+            btn.set_active(key == cur)
+            btn.handler_unblock_by_func(self.on_profile)
+
+    def on_profile(self, btn, key):
+        if btn.get_active():
+            profile_set(key)
+            self.refresh_profile()
+
+    def on_auto(self, row, _pspec):
+        auto = row.get_active()
+        self.scale_fan.set_sensitive(not auto)
+        if auto:
+            fan_auto()
+            self.status_label.set_label("风扇：自动")
+
+    def on_apply_fan(self, _btn):
+        pct = int(self.scale_fan.get_value())
+        if set_fan(pct):
+            self.status_label.set_label(f"风扇：手动 {pct}%  ({pct_to_raw(pct)}/255)")
+        else:
+            self.status_label.set_label("风扇设置失败")
+
+    def reset_gain(self):
+        for ch, sc in self.gain_scales.items():
+            sc.handler_block_by_func(self.on_gain)
+            sc.set_value(100)
+            sc.handler_unblock_by_func(self.on_gain)
+            GAIN[ch] = 1.0
+        save_conf({"gain": GAIN})
+        set_led(self.led_color, self.scale_bright.get_value() * 255 / 100)
+        self.status_label.set_label("增益已复位：原色直出")
+
+    def apply_color(self, rgb):
+        self.led_color = rgb
+        if set_led(rgb, self.scale_bright.get_value() * 255 / 100):
+            self.status_label.set_label(f"键盘灯：#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
+
+    def on_color_pick(self, btn, _pspec):
+        c = btn.get_rgba()
+        self.apply_color((round(c.red * 255), round(c.green * 255), round(c.blue * 255)))
+
+    def on_gain(self, scale, channel):
+        GAIN[channel] = scale.get_value() / 100.0
+        save_conf({"gain": GAIN})
+        set_led(self.led_color, self.scale_bright.get_value() * 255 / 100)
+        self.status_label.set_label(
+            f"增益 R{GAIN['r']:.2f} G{GAIN['g']:.2f} B{GAIN['b']:.2f}"
+        )
+
+    def on_bright(self, scale):
+        set_led(self.led_color, scale.get_value() * 255 / 100)
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="io.github.acershadow.console")
+
+    def do_activate(self):
+        win = self.props.active_window or Console(application=self)
+        win.present()
+
+
+if __name__ == "__main__":
+    App().run([__file__])

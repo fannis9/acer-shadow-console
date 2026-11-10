@@ -1,0 +1,51 @@
+--- a/tuxedo_compatibility_check/tuxedo_compatibility_check.c
++++ b/tuxedo_compatibility_check/tuxedo_compatibility_check.c
+@@ -220,6 +220,7 @@
+ };
+ 
+ bool tuxedo_is_compatible(void) {
++	return true; /* patched: allow non-TUXEDO Clevo barebones */
+ 	if (dmi_check_system(tuxedo_dmi_string_match)
+ 	    || (x86_match_cpu(skip_tuxedo_dmi_string_check_match)
+ 	    && !x86_match_cpu(force_tuxedo_dmi_string_check_match))) {
+--- a/clevo_leds.h
++++ b/clevo_leds.h
+@@ -76,10 +76,9 @@
+  */
+ static void color_scaling(enum clevo_kb_backlight_types *type, u8 *red, u8 *green, u8 *blue)
+ {
+-	if (*type == CLEVO_KB_BACKLIGHT_TYPE_1_ZONE_RGB) {
+-		*red = (180 * *red) / 255;
+-		*blue = (200 * *blue) / 255;
+-	}
++	/* acer-console: 原版对单区键盘把红压到 180/255、蓝压到 200/255，
++	 * 导致选什么颜色都不是原色。这里改为不做校准，所见即所得。 */
++	(void)type; (void)red; (void)green; (void)blue;
+ }
+ 
+ static int clevo_evaluate_set_white_brightness(u8 brightness)
+--- a/tuxedo_io/tuxedo_io.c
++++ b/tuxedo_io/tuxedo_io.c
+@@ -61,6 +61,14 @@
+ 	PROFILE_OVERBOOST = 3,
+ };
+ 
++/* acer-console: 让 /dev/tuxedo_io 默认对普通用户可读写（单用户笔电） */
++static char *tuxedo_io_devnode(const struct device *dev, umode_t *mode)
++{
++	if (mode)
++		*mode = 0666;
++	return NULL;
++}
++
+ static int set_full_fan_mode(bool enable);
+ static int uw_init_fan(void);
+ static u32 uw_set_fan(u32 fan_index, u8 fan_speed);
+@@ -982,6 +990,7 @@
+ 	tuxedo_io_device_class = class_create("tuxedo_io");
+ #endif
+ 
++	tuxedo_io_device_class->devnode = tuxedo_io_devnode;
+ 	device_create(tuxedo_io_device_class, NULL, tuxedo_io_device_handle, NULL, "tuxedo_io");
+ 	pr_debug("Module init successful\n");
+ 	
