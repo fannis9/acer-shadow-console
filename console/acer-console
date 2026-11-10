@@ -225,15 +225,17 @@ class Console(Adw.ApplicationWindow):
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         title = Adw.WindowTitle(title="Acer Shadow", subtitle="EC 控制台")
+        self.window_title = title
         header.set_title_widget(title)
         toolbar.add_top_bar(header)
 
         page = Adw.PreferencesPage()
         toolbar.set_content(page)
 
-        self.toast_overlay = Adw.ToastOverlay()
-        self.toast_overlay.set_child(toolbar)
-        self.set_content(self.toast_overlay)
+        self.set_content(toolbar)
+
+        # 反馈改成标题栏副标题，不弹任何东西
+        self._notice_timer = 0
 
         # ---- 状态 ----
         mon = Adw.PreferencesGroup(title="实时状态")
@@ -407,9 +409,17 @@ class Console(Adw.ApplicationWindow):
 
     # ---------- 行为 ----------
     def notify(self, text):
-        """统一的反馈出口：Toast + 记录最后一条。"""
+        """统一的反馈出口：只改标题栏副标题，不弹出任何窗口。"""
         self._last_notice = text
-        self.toast_overlay.add_toast(Adw.Toast.new(text))
+        self.window_title.set_subtitle(text)
+        if self._notice_timer:
+            GLib.source_remove(self._notice_timer)
+        self._notice_timer = GLib.timeout_add_seconds(4, self._clear_notice)
+
+    def _clear_notice(self):
+        self._notice_timer = 0
+        self.window_title.set_subtitle("EC 控制台")
+        return False
 
     def refresh_monitor(self):
         info = read_fan()
