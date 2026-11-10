@@ -87,8 +87,8 @@ for sz in 16 32 48 64 128 256; do
         "/usr/share/icons/hicolor/${sz}x${sz}/apps/acer-console.png"
 done
 gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
-install -Dm644 "$REPO_DIR/desktop/acer-console.desktop" \
-    /usr/share/applications/acer-console.desktop
+install -Dm644 "$REPO_DIR/desktop/io.github.acershadow.console.desktop" \
+    /usr/share/applications/io.github.acershadow.console.desktop
 update-desktop-database /usr/share/applications 2>/dev/null || true
 
 log "开机自动加载"
