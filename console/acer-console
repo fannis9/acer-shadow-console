@@ -202,37 +202,72 @@ class Console(Adw.ApplicationWindow):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.set_title("Acer Shadow 控制台")
-        self.set_default_size(760, 720)
+        self.set_icon_name("acer-console")
+        self.set_default_size(780, 880)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.set_content(box)
+        # 自定义样式：圆形色块 + 状态数字
+        css = Gtk.CssProvider()
+        rules = ["progressbar { min-height: 6px; }"]
+        for i, (_n, (r, g, b)) in enumerate(PRESETS):
+            rules.append(f".sw{i} {{ background-color: rgb({r},{g},{b}); }}")
+        css.load_from_data(("\n".join(rules) + """
+            .swatch { border-radius: 50%; min-width: 30px; min-height: 30px; padding: 0;
+                      border: 2px solid alpha(currentColor, 0.18); background-clip: padding-box; }
+            .stat-value { font-size: 26px; font-weight: 700; }
+            .stat-name { font-size: 12px; opacity: 0.6; }
+            .colorpick { border-radius: 50%; min-width: 30px; min-height: 30px; padding: 0;
+                         border: 2px solid alpha(currentColor, 0.18); }
+            """).encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
+        toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        self.status_label = Gtk.Label(label="")
-        self.status_label.add_css_class("dim-label")
-        header.pack_start(self.status_label)
-        box.append(header)
+        title = Adw.WindowTitle(title="Acer Shadow", subtitle="EC 控制台")
+        header.set_title_widget(title)
+        toolbar.add_top_bar(header)
 
         page = Adw.PreferencesPage()
-        box.append(page)
+        toolbar.set_content(page)
+
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(toolbar)
+        self.set_content(self.toast_overlay)
 
         # ---- 状态 ----
         mon = Adw.PreferencesGroup(title="实时状态")
         page.add(mon)
-        self.row_cpu = Adw.ActionRow(title="CPU 温度")
-        self.row_gpu = Adw.ActionRow(title="GPU 温度")
-        self.row_fan = Adw.ActionRow(title="风扇转速")
-        self.lbl_cpu = Gtk.Label(label="--")
-        self.lbl_gpu = Gtk.Label(label="--")
-        self.lbl_fan = Gtk.Label(label="--")
-        for row, lbl in (
-            (self.row_cpu, self.lbl_cpu),
-            (self.row_gpu, self.lbl_gpu),
-            (self.row_fan, self.lbl_fan),
+
+        tiles = Gtk.Box(spacing=12)
+        tiles.set_homogeneous(True)
+        tiles.set_margin_top(6)
+        tiles.set_margin_bottom(6)
+        tiles.set_margin_start(6)
+        tiles.set_margin_end(6)
+
+        self.lbl_cpu, self.lbl_gpu, self.lbl_fan = Gtk.Label(label="--"), Gtk.Label(label="--"), Gtk.Label(label="--")
+        self.cap_fan = None
+        for lbl, name in (
+            (self.lbl_cpu, "CPU"),
+            (self.lbl_gpu, "GPU"),
+            (self.lbl_fan, "风扇"),
         ):
-            lbl.add_css_class("title-4")
-            row.add_suffix(lbl)
-            mon.add(row)
+            tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            tile.set_halign(Gtk.Align.CENTER)
+            tile.set_valign(Gtk.Align.CENTER)
+            lbl.add_css_class("stat-value")
+            cap = Gtk.Label(label=name)
+            cap.add_css_class("stat-name")
+            if name == "风扇":
+                self.cap_fan = cap
+            tile.append(lbl)
+            tile.append(cap)
+            tiles.append(tile)
+
+        mon_row = Adw.ActionRow()
+        mon_row.set_child(tiles)
+        mon.add(mon_row)
 
         # ---- 性能模式 ----
         perf = Adw.PreferencesGroup(
@@ -291,21 +326,18 @@ class Console(Adw.ApplicationWindow):
         self.led_color = hw_rgb
         box = Gtk.Box(spacing=6)
         box.set_halign(Gtk.Align.START)
-        for name, rgb in PRESETS:
+        for idx, (name, rgb) in enumerate(PRESETS):
             btn = Gtk.Button()
-            btn.add_css_class("flat")
+            btn.add_css_class("circular")
+            btn.add_css_class("swatch")
+            btn.add_css_class(f"sw{idx}")
             btn.set_tooltip_text(name)
-            sw = Gtk.DrawingArea()
-            sw.set_content_width(24)
-            sw.set_content_height(16)
-            r, g, b = rgb
-            sw.set_draw_func(self.draw_swatch, (r / 255, g / 255, b / 255))
-            btn.set_child(sw)
             btn.connect("clicked", lambda _b, c=rgb: self.apply_color(c))
             box.append(btn)
 
         self.color_btn = Gtk.ColorDialogButton()
         self.color_btn.set_dialog(self._color_dialog())
+        self.color_btn.add_css_class("colorpick")
         self.color_btn.set_rgba(
             Gdk.RGBA(self.led_color[0] / 255, self.led_color[1] / 255, self.led_color[2] / 255, 1.0)
         )
@@ -374,18 +406,24 @@ class Console(Adw.ApplicationWindow):
         return dlg
 
     # ---------- 行为 ----------
+    def notify(self, text):
+        """统一的反馈出口：Toast + 记录最后一条。"""
+        self._last_notice = text
+        self.toast_overlay.add_toast(Adw.Toast.new(text))
+
     def refresh_monitor(self):
         info = read_fan()
         if info is None:
             self.lbl_cpu.set_label("不可用")
             self.lbl_gpu.set_label("不可用")
             self.lbl_fan.set_label("不可用")
-            self.status_label.set_label("模块未加载")
+            self.notify("驱动模块未加载")
             return True  # 必须继续轮询，否则一次失败后定时器就停了
         cpu, gpu, fan = info
         self.lbl_cpu.set_label(f"{cpu} °C")
         self.lbl_gpu.set_label(f"{gpu} °C")
-        self.lbl_fan.set_label(f"{raw_to_pct(fan)} %  ({fan}/255)")
+        self.lbl_fan.set_label(f"{raw_to_pct(fan)}%")
+        self.cap_fan.set_label(f"风扇 · {fan}/255")
         return True
 
     def refresh_profile(self):
@@ -405,14 +443,14 @@ class Console(Adw.ApplicationWindow):
         self.scale_fan.set_sensitive(not auto)
         if auto:
             fan_auto()
-            self.status_label.set_label("风扇：自动")
+            self.notify("风扇：自动")
 
     def on_apply_fan(self, _btn):
         pct = int(self.scale_fan.get_value())
         if set_fan(pct):
-            self.status_label.set_label(f"风扇：手动 {pct}%  ({pct_to_raw(pct)}/255)")
+            self.notify(f"风扇：手动 {pct}%  ({pct_to_raw(pct)}/255)")
         else:
-            self.status_label.set_label("风扇设置失败")
+            self.notify("风扇设置失败")
 
     def reset_gain(self):
         for ch, sc in self.gain_scales.items():
@@ -422,12 +460,19 @@ class Console(Adw.ApplicationWindow):
             GAIN[ch] = 1.0
         save_conf({"gain": GAIN})
         set_led(self.led_color, self.scale_bright.get_value() * 255 / 100)
-        self.status_label.set_label("增益已复位：原色直出")
+        self.notify("增益已复位：原色直出")
 
     def apply_color(self, rgb):
         self.led_color = rgb
-        if set_led(rgb, self.scale_bright.get_value() * 255 / 100):
-            self.status_label.set_label(f"键盘灯：#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
+        level = self.scale_bright.get_value() * 255 / 100
+        if level < 20:
+            # 亮度在 0 附近时点颜色只会像"没反应"，抬到可见默认值
+            self.scale_bright.set_value(60)
+            level = 153
+        if set_led(rgb, level):
+            self.notify(
+                f"键盘灯 #{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X} @ {round(level * 100 / 255)}%"
+            )
 
     def on_color_pick(self, btn, _pspec):
         c = btn.get_rgba()
@@ -437,9 +482,7 @@ class Console(Adw.ApplicationWindow):
         GAIN[channel] = scale.get_value() / 100.0
         save_conf({"gain": GAIN})
         set_led(self.led_color, self.scale_bright.get_value() * 255 / 100)
-        self.status_label.set_label(
-            f"增益 R{GAIN['r']:.2f} G{GAIN['g']:.2f} B{GAIN['b']:.2f}"
-        )
+        self.notify(f"增益 R{GAIN['r']:.2f} G{GAIN['g']:.2f} B{GAIN['b']:.2f}")
 
     def on_bright(self, scale):
         set_led(self.led_color, scale.get_value() * 255 / 100)
