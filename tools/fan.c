@@ -33,6 +33,6 @@ int main(int argc,char**argv){
     int cpu=argc>2?atoi(argv[2]):40, gpu=argc>3?atoi(argv[3]):cpu;
     int32_t v=(cpu&0xFF)|((gpu&0xFF)<<8);
     if(ioctl(fd,W_CL_FANSPEED,&v)) perror("set"); else printf("设定 CPU %d%% GPU %d%%\n",cpu,gpu);
-  } else { printf("用法: %s {show\|set\|auto}\n",argv[0]); }
+  } else { printf("用法: %s {show|set|auto}\n",argv[0]); }
   close(fd); return 0;
 }

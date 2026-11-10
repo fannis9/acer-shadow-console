@@ -35,7 +35,7 @@ git clone --depth 1 --branch "$TD_REF" \
     https://gitlab.com/tuxedocomputers/development/packages/tuxedo-drivers.git "$BUILD"
 
 log "应用补丁"
-patch -d "$BUILD" -p1 < "$REPO_DIR/patches/tuxedo-drivers.patch"
+patch -d "$BUILD/src" -p1 < "$REPO_DIR/patches/tuxedo-drivers.patch"
 
 log "组装 DKMS 源码包到 $SRC"
 rm -rf "$SRC"
