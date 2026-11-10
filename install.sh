@@ -80,6 +80,17 @@ install -Dm644 "$REPO_DIR/systemd/acer-console-perms.service" \
     /etc/systemd/system/acer-console-perms.service
 install -Dm644 "$REPO_DIR/udev/99-acer-console.rules" /etc/udev/rules.d/99-acer-console.rules
 
+log "安装图标与桌面入口"
+ICON_ROOT="${XDG_DATA_HOME:-/root/.local/share}/icons/hicolor"
+for sz in 16 32 48 64 128 256; do
+    install -Dm644 "$REPO_DIR/art/acer-console-$sz.png" \
+        "/usr/share/icons/hicolor/${sz}x${sz}/apps/acer-console.png"
+done
+gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+install -Dm644 "$REPO_DIR/desktop/acer-console.desktop" \
+    /usr/share/applications/acer-console.desktop
+update-desktop-database /usr/share/applications 2>/dev/null || true
+
 log "开机自动加载"
 printf 'clevo_ecwin\nclevo_acpi\ntuxedo_io\n' > /etc/modules-load.d/clevo.conf
 

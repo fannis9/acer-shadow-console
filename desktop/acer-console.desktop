@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Acer Shadow 控制台
+Name[en]=Acer Shadow Console
+Comment=风扇 / 键盘灯 / 性能模式
+Comment[en]=Fan, keyboard backlight and performance profiles
+Exec=acer-console
+Icon=acer-console
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=fan;rgb;acer;clevo;nitro;ec;thermal;
