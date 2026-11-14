@@ -1,0 +1,12 @@
+[Unit]
+Description=acer-console: 开机恢复键盘灯颜色
+After=acer-console-perms.service
+Wants=acer-console-perms.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/acer-led-restore.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

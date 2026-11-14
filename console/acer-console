@@ -154,6 +154,14 @@ def apply_gain(rgb):
     )
 
 
+def save_led_state(rgb, level):
+    conf = load_conf()
+    conf["color"] = [int(rgb[0]), int(rgb[1]), int(rgb[2])]
+    conf["brightness"] = int(level)
+    conf["gain"] = GAIN
+    save_conf(conf)
+
+
 def set_led(rgb, level):
     """单区键盘。写颜色后必须让 brightness 变化一次，驱动才会下发。"""
     rgb = apply_gain(rgb)
@@ -165,6 +173,7 @@ def set_led(rgb, level):
         for value in (max(0, level - 1), level):
             with open(f"{LED_DIR}/brightness", "w") as fh:
                 fh.write(str(value))
+        save_led_state(rgb, level)
         _log(f"set_led OK -> {open(f'{LED_DIR}/multi_intensity').read().strip()} @ {open(f'{LED_DIR}/brightness').read().strip()}")
         return True
     except OSError as exc:

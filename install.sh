@@ -76,8 +76,11 @@ fi
 install -Dm755 "$REPO_DIR/console/acer-console" /usr/local/bin/acer-console
 cc -O2 -o /usr/local/bin/acer-fan "$REPO_DIR/tools/fan.c"
 install -Dm755 "$REPO_DIR/scripts/acer-perms.sh" /usr/local/sbin/acer-perms.sh
+install -Dm755 "$REPO_DIR/scripts/acer-led-restore.sh" /usr/local/sbin/acer-led-restore.sh
 install -Dm644 "$REPO_DIR/systemd/acer-console-perms.service" \
     /etc/systemd/system/acer-console-perms.service
+install -Dm644 "$REPO_DIR/systemd/acer-console-led.service" \
+    /etc/systemd/system/acer-console-led.service
 install -Dm644 "$REPO_DIR/udev/99-acer-console.rules" /etc/udev/rules.d/99-acer-console.rules
 
 log "安装图标与桌面入口"
@@ -97,6 +100,7 @@ printf 'clevo_ecwin\nclevo_acpi\ntuxedo_io\n' > /etc/modules-load.d/clevo.conf
 log "启用权限服务"
 systemctl daemon-reload
 systemctl enable --now acer-console-perms.service
+systemctl enable --now acer-console-led.service
 
 log "完成。"
 echo
